@@ -1,4 +1,3 @@
-# save_embeddings.py
 import os
 import pickle
 import numpy as np
@@ -30,10 +29,8 @@ def classify_genre(title: str, description: str):
     """Sends the podcast name and description to ChatGPT to classify its genre."""
     prompt = f"""
     Given the following podcast title and description, classify it into one of these genres: {', '.join(OFFICIAL_GENRES)}.
-
     Title: {title}
     Description: {description}
-
     Respond with only the genre name.
     """
 
@@ -45,7 +42,7 @@ def classify_genre(title: str, description: str):
         predicted_genre = response["choices"][0]["message"]["content"].strip()
 
         if predicted_genre not in OFFICIAL_GENRES:
-            print(f" Warning: '{predicted_genre}' is not a valid genre. Setting as 'Unknown'.")
+            print(f"Warning: '{predicted_genre}' is not a valid genre. Setting as 'Unknown'.")
             return "Unknown"
 
         return predicted_genre
@@ -62,8 +59,8 @@ def generate_embedding(text: str):
     )
     return np.array(response["data"][0]["embedding"], dtype=np.float32)
 
-def fetch_podcasts(country="IL", total=100):
-    """Fetches the top podcasts from Spotify for a given country."""
+def fetch_podcasts(country="IL", total=150):
+    """Fetches the top 150 podcasts from Spotify for a given country and retrieves episode duration."""
     print(f"Fetching the top {total} podcast shows from Spotify in {country}...")
     podcasts = []
     limit = 50
@@ -79,10 +76,23 @@ def fetch_podcasts(country="IL", total=100):
             title = show["name"]
             description = show.get("description", "No description available")
 
+            # Fetch episode details to get duration
+            try:
+                episodes = sp.show_episodes(podcast_id, market=country, limit=1)["items"]
+                if episodes:
+                    first_episode = episodes[0]
+                    duration_ms = first_episode.get("duration_ms", None)
+                else:
+                    duration_ms = None
+            except Exception as e:
+                print(f"Warning: Failed to fetch episode details for {title}: {e}")
+                duration_ms = None
+
             podcasts.append({
                 "podcast_id": podcast_id,
                 "title": title,
-                "description": description
+                "description": description,
+                "duration_ms": duration_ms,
             })
 
     print(f"Fetched {len(podcasts)} podcasts from Spotify.")
@@ -108,13 +118,17 @@ def save_embeddings_to_db():
 
         # Store in SQLite
         cursor.execute(
-            "INSERT INTO podcasts (podcast_id, title, genre, description, embedding) VALUES (?, ?, ?, ?, ?)",
-            (podcast["podcast_id"], podcast["title"], genre, podcast["description"], pickle.dumps(embedding))
+            """
+            INSERT INTO podcasts (podcast_id, title, genre, description, embedding, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (podcast["podcast_id"], podcast["title"], genre, podcast["description"], pickle.dumps(embedding),
+             podcast["duration_ms"])
         )
 
     conn.commit()
     conn.close()
-    print("✅ All podcasts saved successfully!")
+    print("All podcasts saved successfully!")
 
 if __name__ == "__main__":
     save_embeddings_to_db()
