@@ -1,7 +1,8 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from recommendation import generate_podcast_recommendations
 from summarization import generate_episode_summary
+from person_search import search_episodes_by_person
 
 router = APIRouter()
 
@@ -23,3 +24,19 @@ class EpisodeRequest(BaseModel):
 def summarize_episode(request: EpisodeRequest):
     """Finds the episode and returns a one-page summary."""
     return generate_episode_summary(request.podcast_name, request.episode_name)
+
+class PersonSearchRequest(BaseModel):
+    person_name: str  # Expect JSON input instead of query param
+
+@router.post("/search_by_person")
+def search_person(request: PersonSearchRequest):
+    """Search for podcast episodes where a specific person is mentioned."""
+    if not request.person_name:
+        raise HTTPException(status_code=400, detail="Person name is required.")
+
+    results = search_episodes_by_person(request.person_name)
+
+    if "error" in results:
+        raise HTTPException(status_code=404, detail=results["error"])
+
+    return {"search_results": results}
