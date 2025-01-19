@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from recommendation import generate_podcast_recommendations
 from summarization import generate_episode_summary
 from person_search import search_episodes_by_person
-
+from guest_info import find_guest_info
 router = APIRouter()
 
 class RecommendationRequest(BaseModel):
@@ -40,3 +40,21 @@ def search_person(request: PersonSearchRequest):
         raise HTTPException(status_code=404, detail=results["error"])
 
     return {"search_results": results}
+
+# Request Model for Guest Information Retrieval
+class GuestInfoRequest(BaseModel):
+    podcast_name: str
+    episode_name: str
+
+@router.post("/find_guest_info")
+def get_guest_info(request: GuestInfoRequest):
+    """Finds guest information (name & LinkedIn) for a given podcast episode."""
+    if not request.podcast_name or not request.episode_name:
+        raise HTTPException(status_code=400, detail="Podcast name and episode name are required.")
+
+    guest_info = find_guest_info({"podcast_name": request.podcast_name, "episode_name": request.episode_name})
+
+    if "error" in guest_info:
+        raise HTTPException(status_code=404, detail=guest_info["error"])
+
+    return guest_info
