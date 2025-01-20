@@ -19,7 +19,7 @@ OFFICIAL_GENRES = [
 ]
 
 def classify_personality_genre(personalities):
-    """Uses OpenAI to determine the most relevant genre(s) for given personalities."""
+    """Uses OpenAI to determine the most relevant genre for given personalities."""
     prompt = f"""
     Given the following famous personalities: {', '.join(personalities)},
     determine which of these podcast genre they are MOSTLY associated with: {', '.join(OFFICIAL_GENRES)}.
@@ -42,7 +42,7 @@ def classify_personality_genre(personalities):
         return matched_genres
 
     except Exception as e:
-        print(f"⚠️ Error classifying personalities' genres with OpenAI: {e}")
+        print(f"Error classifying personalities' genres with OpenAI: {e}")
         return ["Unknown"]
 
 def load_podcast_data():
@@ -71,7 +71,7 @@ def load_podcast_data():
     return podcast_dict, podcast_durations, podcast_genres
 
 def generate_podcast_recommendations(user_personalities, available_time_min, num_trees=10):
-    """Recommends podcasts based on personalities' associated genres and filters by episode duration."""
+    """Recommends podcasts based on personalities' associated genres and finds the closest duration match."""
 
     # Get genres based on user-selected personalities
     personality_genres = classify_personality_genre(user_personalities)
@@ -81,7 +81,7 @@ def generate_podcast_recommendations(user_personalities, available_time_min, num
         return {"error": "No podcasts found with embeddings"}
 
     # Convert available time from minutes to milliseconds
-    max_duration_ms = available_time_min * 60 * 1000
+    target_duration_ms = available_time_min * 60 * 1000
 
     # Build an Annoy index
     dim = len(next(iter(podcast_dict.values())))
@@ -114,28 +114,23 @@ def generate_podcast_recommendations(user_personalities, available_time_min, num
     # Find the nearest neighbors using Annoy
     nearest_neighbors = annoy_index.get_nns_by_vector(average_vector, 10, include_distances=True)
 
-    # Get the recommended podcasts and filter by available time
+    # Get the recommended podcasts
     recommendations = []
     for idx, dist in zip(nearest_neighbors[0], nearest_neighbors[1]):
         show_name = podcast_titles[idx]
         duration = podcast_durations.get(show_name, None)
 
-        if duration and duration <= max_duration_ms:  # Check if duration fits user preference
+        if duration is not None:
             similarity_score = 1 - dist
             similarity_score = max(0, min(similarity_score, 1))
             similarity_percentage = round(similarity_score * 100, 3)
 
             recommendations.append((show_name, similarity_percentage, duration))
 
-    # Ensure exactly 5 recommendations
-    if len(recommendations) < 3:
-        remaining_shows = [
-            (title, 50, podcast_durations.get(title, None))
-            for title in podcast_titles if title not in [r[0] for r in recommendations]
-        ]
-        recommendations.extend(remaining_shows[: 3 - len(recommendations)])
-        recommendations.sort(key=lambda x: x[1], reverse=True)
+    # Sort recommendations by closest duration match to user preference
+    recommendations.sort(key=lambda x: abs(x[2] - target_duration_ms))
 
+    # Ensure exactly 3 recommendations
     return {
         "recommended_podcasts": [
             {"title": rec[0], "similarity": rec[1], "duration_ms": rec[2]}

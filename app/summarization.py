@@ -1,115 +1,167 @@
-import openai
+import yt_dlp
 import os
-import spotipy
+import re
 import requests
-from spotipy.oauth2 import SpotifyClientCredentials
+import time
+from urllib.parse import quote
 from dotenv import load_dotenv
+import openai
 
 load_dotenv()
 
-# Initialize OpenAI API
+# AssemblyAI API key
+ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
+
+# OpenAI API Key
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Initialize Spotify API
-sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-    client_id=os.getenv("SPOTIFY_CLIENT_ID"),
-    client_secret=os.getenv("SPOTIFY_CLIENT_SECRET")
-))
 
-def fetch_episode_details(podcast_name, episode_name):
-    """Fetches episode details including description and audio preview URL from Spotify API."""
-    try:
-        # Search for the podcast show
-        results = sp.search(q=podcast_name, type="show", limit=1)
-        if not results["shows"]["items"]:
-            return None, None, "Podcast not found."
+def search_apple_podcast(podcast_name, episode_name):
+    """
+    Search for a podcast episode on Apple Podcasts and return the episode URL.
+    """
+    search_url = f"https://itunes.apple.com/search?term={quote(podcast_name)}&media=podcast"
+    response = requests.get(search_url)
+    response.raise_for_status()
+    data = response.json()
 
-        podcast_id = results["shows"]["items"][0]["id"]
-
-        # Fetch episodes of the show
-        episodes = sp.show_episodes(podcast_id, limit=50)["items"]
-        for episode in episodes:
-            if episode_name.lower() in episode["name"].lower():
-                description = episode.get("description", "No description available")
-                audio_url = episode.get("audio_preview_url", None)
-                return description, audio_url, None
-
-        return None, None, "Episode not found."
-
-    except Exception as e:
-        return None, None, f"Error fetching episode: {e}"
+    for result in data.get("results", []):
+        if podcast_name.lower() in result.get("collectionName", "").lower():
+            feed_url = result.get("feedUrl")
+            if feed_url:
+                return extract_episode_url(feed_url, episode_name)
+    return None
 
 
-def transcribe_audio(audio_url):
-    """Downloads and transcribes the episode's audio preview using OpenAI Whisper API."""
-    if not audio_url:
-        return None
+def extract_episode_url(feed_url, episode_name):
+    """
+    Fetch the RSS feed and extract the episode URL.
+    """
+    response = requests.get(feed_url)
+    response.raise_for_status()
 
-    try:
-        response = requests.get(audio_url, stream=True)
-        if response.status_code != 200:
-            return None
-
-        # Save audio file temporarily
-        audio_path = "temp_audio.mp3"
-        with open(audio_path, "wb") as f:
-            f.write(response.content)
-
-        # Transcribe using OpenAI Whisper API
-        with open(audio_path, "rb") as audio_file:
-            transcription = openai.Audio.transcribe(
-                model="whisper-1",
-                file=audio_file,
-                response_format="text"
-            )
-
-        os.remove(audio_path)  # Clean up temporary file
-        return transcription.strip()
-
-    except Exception as e:
-        print(f"⚠️ Error transcribing audio: {e}")
-        return None
+    matches = re.findall(r'<item>.*?<title>(.*?)</title>.*?<enclosure url="(.*?)"', response.text, re.DOTALL)
+    for title, episode_url in matches:
+        if episode_name.lower() in title.lower():
+            return episode_url
+    return None
 
 
-def summarize_text(description, transcript):
-    """Summarizes the episode using OpenAI, combining text and transcript if available."""
-    combined_text = f"""
-    Summarize the following podcast episode into a clear and structured one-page summary. 
-    The summary should capture the main themes, key discussions, and any emotional or factual highlights. 
-    Keep the summary engaging and concise, ensuring it reflects the core of the episode. 
-    If an audio preview transcript is available, incorporate relevant insights from it. 
+def download_podcast_episode(podcast_name, episode_name):
+    """
+    Download a podcast episode from Apple Podcasts given the podcast name and episode name.
+    Returns the path to the downloaded file.
+    """
+    output_file = f"{podcast_name}_{episode_name}.mp3"
 
-Episode Description:
-{description}
+    if os.path.exists(output_file):
+        print(f"File '{output_file}' already exists. Skipping download.")
+        return os.path.abspath(output_file)
 
-Audio Preview Transcription:
-{transcript if transcript else 'No audio preview available.'}
+    episode_url = search_apple_podcast(podcast_name, episode_name)
+    if not episode_url:
+        raise ValueError(f"Episode '{episode_name}' of podcast '{podcast_name}' not found.")
 
-Provide a structured, plain-text summary, ensuring readability without bullet points or special formatting.
-"""
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": combined_text}]
-        )
-        return response["choices"][0]["message"]["content"].strip()
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': output_file,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+    }
 
-    except Exception as e:
-        return f"Error generating summary: {e}"
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([episode_url])
+
+    return os.path.abspath(output_file)
+
+
+def upload_to_assemblyai(file_path):
+    """
+    Uploads the podcast episode to AssemblyAI for transcription.
+    """
+    headers = {'authorization': ASSEMBLYAI_API_KEY}
+    with open(file_path, 'rb') as f:
+        response = requests.post("https://api.assemblyai.com/v2/upload", headers=headers, files={'file': f})
+
+    if response.status_code == 200:
+        return response.json().get("upload_url")
+    else:
+        raise ValueError("❌ Failed to upload audio file to AssemblyAI.")
+
+
+def transcribe_audio(file_url):
+    """
+    Sends an uploaded file URL to AssemblyAI for transcription.
+    """
+    headers = {'authorization': ASSEMBLYAI_API_KEY, 'content-type': 'application/json'}
+    data = {'audio_url': file_url}
+
+    response = requests.post("https://api.assemblyai.com/v2/transcript", json=data, headers=headers)
+
+    if response.status_code == 200:
+        transcript_id = response.json().get("id")
+    else:
+        raise ValueError("❌ Failed to initiate transcription.")
+
+    # Wait for transcription to complete
+    while True:
+        status_response = requests.get(f"https://api.assemblyai.com/v2/transcript/{transcript_id}", headers=headers)
+        status_json = status_response.json()
+
+        if status_json.get("status") == "completed":
+            return status_json.get("text")
+        elif status_json.get("status") == "failed":
+            raise ValueError("❌ Transcription failed.")
+
+        time.sleep(10)
+
+
+def summarize_text(transcript):
+    """
+    Uses OpenAI GPT to summarize the episode transcript into a structured, one-page summary.
+    """
+    prompt = f"""
+    You are an expert in summarizing podcast episodes. 
+    Your task is to create a structured and engaging one-page summary that captures the key themes, discussions, and insights of the episode.
+    Ensure the summary is easy to understand, concise, and well-structured.
+
+    **Episode Transcript:**
+    {transcript}
+    
+    Answer as a plain-text, start you answer with "This episode is about..."
+    """
+
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]    )
+    return response["choices"][0]["message"]["content"].strip()
 
 
 def generate_episode_summary(podcast_name, episode_name):
-    """Fetches the episode, transcribes audio, and generates a one-page summary."""
-    description, audio_url, error = fetch_episode_details(podcast_name, episode_name)
+    """
+    Fetches, downloads (if not already downloaded), transcribes, and summarizes a podcast episode.
+    """
+    try:
+        #  Download episode (if not already downloaded)
+        file_path = download_podcast_episode(podcast_name, episode_name)
 
-    if error:
-        return {"error": error}
+        #  Upload to AssemblyAI
+        file_url = upload_to_assemblyai(file_path)
 
-    transcript = transcribe_audio(audio_url)
-    summary = summarize_text(description, transcript)
+        #  Get transcript
+        transcript = transcribe_audio(file_url)
 
-    return {
-        "podcast_name": podcast_name,
-        "episode_name": episode_name,
-        "summary": summary
-    }
+        #  Generate summary
+        summary = summarize_text(transcript)
+
+        return {
+            "podcast_name": podcast_name,
+            "episode_name": episode_name,
+            "summary": summary
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
