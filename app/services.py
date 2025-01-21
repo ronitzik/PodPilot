@@ -4,6 +4,7 @@ from recommendation import generate_podcast_recommendations
 from summarization import generate_episode_summary
 from person_search import search_episodes_by_person
 from guest_info import find_guest_info
+from voice_summary import generate_voice_summary
 router = APIRouter()
 
 class RecommendationRequest(BaseModel):
@@ -58,3 +59,28 @@ def get_guest_info(request: GuestInfoRequest):
         raise HTTPException(status_code=404, detail=guest_info["error"])
 
     return guest_info
+
+# New Feature: Voice Summary of an Episode Segment
+class VoiceSummaryRequest(BaseModel):
+    podcast_name: str
+    episode_name: str
+    start_time: str  # Expected format: "HH:MM:SS"
+    end_time: str  # Expected format: "HH:MM:SS"
+
+@router.post("/voice_summary")
+def voice_summary(request: VoiceSummaryRequest):
+    """Generates a voice summary for a specific part of a podcast episode."""
+    if not request.podcast_name or not request.episode_name or not request.start_time or not request.end_time:
+        raise HTTPException(status_code=400, detail="Podcast name, episode name, start time, and end time are required.")
+
+    summary_audio_url = generate_voice_summary(
+        podcast_name=request.podcast_name,
+        episode_name=request.episode_name,
+        start_time=request.start_time,
+        end_time=request.end_time
+    )
+
+    if "error" in summary_audio_url:
+        raise HTTPException(status_code=404, detail=summary_audio_url["error"])
+
+    return {"summary_audio_url": summary_audio_url}

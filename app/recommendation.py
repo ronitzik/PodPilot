@@ -32,7 +32,6 @@ def classify_personality_genre(personalities):
             messages=[{"role": "user", "content": prompt}]
         )
         predicted_genres = response["choices"][0]["message"]["content"].strip()
-
         matched_genres = [genre for genre in OFFICIAL_GENRES if genre in predicted_genres]
 
         if not matched_genres:
@@ -71,7 +70,7 @@ def load_podcast_data():
     return podcast_dict, podcast_durations, podcast_genres
 
 def generate_podcast_recommendations(user_personalities, available_time_min, num_trees=10):
-    """Recommends podcasts based on personalities' associated genres and finds the closest duration match."""
+    """Recommends podcasts based on personalities' associated genres, highest similarity, and closest duration match."""
 
     # Get genres based on user-selected personalities
     personality_genres = classify_personality_genre(user_personalities)
@@ -95,29 +94,34 @@ def generate_podcast_recommendations(user_personalities, available_time_min, num
     annoy_index.build(num_trees)
 
     # Filter podcasts by matching genres
-    filtered_podcast_titles = [
+    filtered_podcasts = [
         title for title, genre in podcast_genres.items() if any(g in genre for g in personality_genres)
     ]
 
-    if not filtered_podcast_titles:
+    if not filtered_podcasts:
         return {"error": "No podcasts found for the given personalities' genres"}
 
-    # Get embeddings for matching genre podcasts
-    genre_embeddings = [podcast_dict[title] for title in filtered_podcast_titles if title in podcast_dict]
+    # Get embeddings for the filtered genre podcasts
+    filtered_embeddings = [
+        (title, podcast_dict[title]) for title in filtered_podcasts if title in podcast_dict
+    ]
 
-    if not genre_embeddings:
+    if not filtered_embeddings:
         return {"error": "No embeddings found for filtered genre podcasts"}
 
-    # Compute the average embedding for the selected genre podcasts
-    average_vector = np.mean(genre_embeddings, axis=0)
+    # Compute the average embedding for the filtered genre podcasts
+    filtered_titles, filtered_vectors = zip(*filtered_embeddings)
+    average_vector = np.mean(filtered_vectors, axis=0)
 
     # Find the nearest neighbors using Annoy
-    nearest_neighbors = annoy_index.get_nns_by_vector(average_vector, 10, include_distances=True)
+    nearest_neighbors = annoy_index.get_nns_by_vector(average_vector, len(filtered_titles), include_distances=True)
 
-    # Get the recommended podcasts
+    # Get the recommended podcasts with similarity scores
     recommendations = []
     for idx, dist in zip(nearest_neighbors[0], nearest_neighbors[1]):
         show_name = podcast_titles[idx]
+        if show_name not in filtered_podcasts:
+            continue
         duration = podcast_durations.get(show_name, None)
 
         if duration is not None:
@@ -127,10 +131,12 @@ def generate_podcast_recommendations(user_personalities, available_time_min, num
 
             recommendations.append((show_name, similarity_percentage, duration))
 
-    # Sort recommendations by closest duration match to user preference
+    # Sort recommendations by similarity score (highest first)
+    recommendations.sort(key=lambda x: x[1], reverse=True)
+
+    # From the sorted list, find the top 3 recommendations closest to the user's available time
     recommendations.sort(key=lambda x: abs(x[2] - target_duration_ms))
 
-    # Ensure exactly 3 recommendations
     return {
         "recommended_podcasts": [
             {"title": rec[0], "similarity": rec[1], "duration_ms": rec[2]}
