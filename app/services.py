@@ -5,6 +5,8 @@ from summarization import generate_episode_summary
 from person_search import search_episodes_by_person
 from guest_info import find_guest_info
 from voice_summary import generate_voice_summary
+from article_podcast import generate_podcast_from_article
+
 router = APIRouter()
 
 class RecommendationRequest(BaseModel):
@@ -84,3 +86,21 @@ def voice_summary(request: VoiceSummaryRequest):
         raise HTTPException(status_code=404, detail=summary_audio_url["error"])
 
     return {"summary_audio_url": summary_audio_url}
+
+class ArticlePodcastRequest(BaseModel):
+    article_url: str
+
+@router.post("/generate_podcast_from_article")
+def generate_podcast(request: ArticlePodcastRequest):
+    """Generates a podcast episode based on an article URL."""
+    if not request.article_url:
+        raise HTTPException(status_code=400, detail="Article URL is required.")
+
+    podcast_audio_url = generate_podcast_from_article(
+        article_url=request.article_url
+    )
+
+    if "error" in podcast_audio_url:
+        raise HTTPException(status_code=500, detail=podcast_audio_url["error"])
+
+    return {"podcast_audio_url": podcast_audio_url}
