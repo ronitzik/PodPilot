@@ -1,134 +1,187 @@
 import os
-import pickle
+import requests
 import numpy as np
-import openai
-import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
+import torch
 from dotenv import load_dotenv
-from database import get_db_connection
+from transformers import AutoTokenizer, AutoModel
+from sqlalchemy import create_engine, Column, Integer, String, Text, LargeBinary, JSON
+from sqlalchemy.orm import sessionmaker, declarative_base
 
+# Load environment variables
 load_dotenv()
+X_USER_ID = os.getenv("X_USER_ID")
+X_API_KEY = os.getenv("X_API_KEY")
 
-# Initialize OpenAI API
-openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Initialize Spotify API
-sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-    client_id=os.getenv("SPOTIFY_CLIENT_ID"),
-    client_secret=os.getenv("SPOTIFY_CLIENT_SECRET")
-))
+# Set up the ORM base class
+Base = declarative_base()
 
-# Define official genre categories
-OFFICIAL_GENRES = [
-    "Arts", "Business", "Comedy", "Education", "Health & Fitness", "History",
-    "Kids & Family", "Leisure", "Music", "News", "Religion & Spirituality",
-    "Science", "Society & Culture", "Sports", "Technology", "True Crime", "TV & Film"
-]
 
-def classify_genre(title: str, description: str):
-    """Sends the podcast name and description to ChatGPT to classify its genre."""
-    prompt = f"""
-    Given the following podcast title and description, classify it into one of these genres: {', '.join(OFFICIAL_GENRES)}.
-    Title: {title}
-    Description: {description}
-    Respond with only the genre name.
-    """
+# Database 1: Store Podcasts and Embeddings
+class Podcast(Base):
+    __tablename__ = 'podcasts'
 
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        predicted_genre = response["choices"][0]["message"]["content"].strip()
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    podcast_id = Column(String, unique=True, index=True)  # From Taddy API
+    title = Column(String, index=True)
+    description = Column(Text)
+    genre = Column(String)
+    embedding = Column(LargeBinary)  # Store embeddings as binary data
 
-        if predicted_genre not in OFFICIAL_GENRES:
-            print(f"Warning: '{predicted_genre}' is not a valid genre. Setting as 'Unknown'.")
-            return "Unknown"
 
-        return predicted_genre
+# Database 2: Store User Preferences
+class UserPreference(Base):
+    __tablename__ = 'user_preferences'
 
-    except Exception as e:
-        print(f"⚠️ Error classifying genre with ChatGPT: {e}")
-        return "Unknown"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, unique=True, index=True)  # Ensure one record per user
+    liked_podcasts = Column(JSON)
+
+
+# Initialize Databases
+podcast_engine = create_engine("sqlite:///podcasts.db")
+user_pref_engine = create_engine("sqlite:///user_preferences.db")
+
+Base.metadata.create_all(podcast_engine)
+Base.metadata.create_all(user_pref_engine)
+
+PodcastSession = sessionmaker(bind=podcast_engine)
+UserPrefSession = sessionmaker(bind=user_pref_engine)
+
+podcast_session = PodcastSession()
+user_pref_session = UserPrefSession()
+
+# Load Pre-trained Embedding Model
+tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+model = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+
 
 def generate_embedding(text: str):
-    """Generates an embedding for the given text using OpenAI API."""
-    response = openai.Embedding.create(
-        model="text-embedding-ada-002",
-        input=text
-    )
-    return np.array(response["data"][0]["embedding"], dtype=np.float32)
+    """Generates an embedding for the given text using Hugging Face Transformers."""
+    if not text.strip():
+        return np.zeros(384)
 
-def fetch_podcasts(country="IL", total=150):
-    """Fetches the top 150 podcasts from Spotify for a given country and retrieves episode duration."""
-    print(f"Fetching the top {total} podcast shows from Spotify in {country}...")
-    podcasts = []
-    limit = 50
-    num_requests = total // limit
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+    embedding = outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
+    return embedding
 
-    for i in range(num_requests):
-        offset = i * limit
 
-        results = sp.search(q="podcasts", type="show", market=country, limit=limit, offset=offset)
+def fetch_top_podcasts():
+    """Fetches the top 200 podcasts in Israel from the Taddy API."""
+    API_URL = "https://api.taddy.org"
 
-        for show in results["shows"]["items"]:
-            podcast_id = show["id"]
-            title = show["name"]
-            description = show.get("description", "No description available")
+    headers = {
+        "Content-Type": "application/json",
+        "X-USER-ID": X_USER_ID,
+        "X-API-KEY": X_API_KEY
+    }
 
-            # Fetch episode details to get duration
-            try:
-                episodes = sp.show_episodes(podcast_id, market=country, limit=1)["items"]
-                if episodes:
-                    first_episode = episodes[0]
-                    duration_ms = first_episode.get("duration_ms", None)
-                else:
-                    duration_ms = None
-            except Exception as e:
-                print(f"Warning: Failed to fetch episode details for {title}: {e}")
-                duration_ms = None
+    all_podcasts = []
+    page = 1
+    max_pages = 8
 
-            podcasts.append({
-                "podcast_id": podcast_id,
-                "title": title,
-                "description": description,
-                "duration_ms": duration_ms,
-            })
+    while len(all_podcasts) < 200 and page <= max_pages:
+        graphql_query = {
+            "query": f"""
+            {{
+                getTopChartsByCountry(
+                    taddyType: PODCASTSERIES, 
+                    country: ISRAEL, 
+                    limitPerPage: 25, 
+                    page: {page}
+                ) {{
+                    topChartsId
+                    podcastSeries {{
+                        uuid
+                        name
+                        description  
+                        genres
+                    }}
+                }}
+            }}
+            """
+        }
 
-    print(f"Fetched {len(podcasts)} podcasts from Spotify.")
-    return podcasts
+        try:
+            response = requests.post(API_URL, headers=headers, json=graphql_query)
+            response.raise_for_status()
 
-def save_embeddings_to_db():
-    """Fetches podcast shows, classifies genres using ChatGPT, generates embeddings, and stores them in SQLite."""
-    podcasts = fetch_podcasts()
-    conn = get_db_connection()
-    cursor = conn.cursor()
+            data = response.json()
+            # Extract podcast series data
+            podcasts = data.get("data", {}).get("getTopChartsByCountry", {}).get("podcastSeries", [])
+
+            if not podcasts:
+                print(f"⚠️ No more podcasts returned on page {page}. Stopping pagination.")
+                break
+
+            all_podcasts.extend(podcasts)
+            page += 1  # Move to the next page
+
+        except requests.exceptions.RequestException as e:
+            print(f" Error fetching data from Taddy API on page {page}: {e}")
+            break
+
+    print(f" Fetched {len(all_podcasts)} podcasts from Taddy API.")
+    return all_podcasts[:300]  # Ensure we return exactly 300 results
+
+
+def save_podcasts_to_db():
+    """Fetches top 200 podcasts, generates embeddings, and stores them in SQLite."""
+    podcasts = fetch_top_podcasts()
+
+    if not podcasts:
+        print("No podcasts fetched.")
+        return
+
+    podcast_objects = []
 
     for podcast in podcasts:
-        cursor.execute("SELECT 1 FROM podcasts WHERE podcast_id = ?", (podcast["podcast_id"],))
-        if cursor.fetchone():
-            print(f"Skipping {podcast['title']} (already exists)")
-            continue
+        podcast_id = podcast.get("uuid")  # Use `uuid` instead of `id`
+        title = podcast.get("name", "Unknown Title")  # Ensure title is not None
+        if title is None:  # Additional safety check
+            title = "Unknown Title"
 
-        print(f"Classifying genre for {podcast['title']} using ChatGPT...")
-        genre = classify_genre(podcast["title"], podcast["description"])
+        description = podcast.get("description", "No description available")
+        # Extract the genre
+        genre_data = podcast.get("genres", [])
+        if isinstance(genre_data, list) and genre_data:
+            genre = genre_data[0]
+        else:
+            genre = "Unknown Genre"
 
-        print(f"Generating embedding for {podcast['title']}...")
-        embedding = generate_embedding(f"{podcast['title']} {genre} {podcast['description']}")
+            # Generate embedding for the podcast
+        full_text = f"{title}. {description}. Genre: {genre}"
+        embedding = generate_embedding(full_text)
+        embedding_binary = np.array(embedding).tobytes()
 
-        # Store in SQLite
-        cursor.execute(
-            """
-            INSERT INTO podcasts (podcast_id, title, genre, description, embedding, duration_ms)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (podcast["podcast_id"], podcast["title"], genre, podcast["description"], pickle.dumps(embedding),
-             podcast["duration_ms"])
-        )
+        # Store podcast details in the database
+        podcast_objects.append(Podcast(
+            podcast_id=podcast_id,
+            title=title,
+            description=description,
+            genre=genre,
+            embedding=embedding_binary,
+        ))
 
-    conn.commit()
-    conn.close()
-    print("All podcasts saved successfully!")
+    podcast_session.bulk_save_objects(podcast_objects)  # Faster than adding one by one
+    podcast_session.commit()
+    print(f" Saved {len(podcasts)} podcasts with embeddings to the database.")
+
+
+def save_user_preference(user_id, podcast_id, podcast_name, liked):
+    """Saves user preference (liked podcast) into user_preferences.db."""
+    preference = UserPreference(
+        user_id=user_id,
+        podcast_id=podcast_id,
+        podcast_name=podcast_name,
+        liked=liked
+    )
+    user_pref_session.add(preference)
+    user_pref_session.commit()
+    print(f"✅ User {user_id} liked podcast {podcast_name}.")
+
 
 if __name__ == "__main__":
-    save_embeddings_to_db()
+    save_podcasts_to_db()
