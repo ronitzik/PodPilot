@@ -35,7 +35,8 @@ class UserPreference(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, unique=True, index=True)  # Ensure one record per user
-    liked_podcasts = Column(JSON)
+    liked_podcasts = Column(Text)
+    disliked_podcasts  = Column(Text)
 
 
 # Initialize Databases
