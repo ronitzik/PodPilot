@@ -171,18 +171,5 @@ def save_podcasts_to_db():
     print(f" Saved {len(podcasts)} podcasts with embeddings to the database.")
 
 
-def save_user_preference(user_id, podcast_id, podcast_name, liked):
-    """Saves user preference (liked podcast) into user_preferences.db."""
-    preference = UserPreference(
-        user_id=user_id,
-        podcast_id=podcast_id,
-        podcast_name=podcast_name,
-        liked=liked
-    )
-    user_pref_session.add(preference)
-    user_pref_session.commit()
-    print(f"✅ User {user_id} liked podcast {podcast_name}.")
-
-
 if __name__ == "__main__":
     save_podcasts_to_db()

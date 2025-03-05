@@ -10,10 +10,9 @@ from save_embeddings import Podcast, UserPreference, user_pref_session, podcast_
 
 # Load env variables
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SEARCH_ENGINE_ID = os.getenv("GOOGLE_CX")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-openai.api_key = OPENAI_API_KEY
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 
 def get_podcasts_by_genre(genre, exclude_titles=set(), limit=3):
@@ -25,8 +24,8 @@ def get_podcasts_by_genre(genre, exclude_titles=set(), limit=3):
 
 
 def collect_user_preferences(user_id):
-    """Dynamically suggest podcasts and adjust based on user feedback until 5 liked podcasts are collected."""
-    print("\n Let's learn your podcast preferences!")
+    """Dynamically suggest podcasts and adjust based on user feedback until 3 liked podcasts are collected."""
+    print("\nLet's learn your podcast preferences!")
 
     # Get all podcasts categorized by genre
     all_podcasts = podcast_session.query(Podcast).all()
@@ -50,30 +49,29 @@ def collect_user_preferences(user_id):
     random.shuffle(available_genres)
 
     while len(liked_podcasts) < 3:
-        # If user liked a genre, suggest more from that genre; otherwise, try another genre
-        if liked_podcasts:
-            preferred_genre = liked_podcasts[-1]["genre"]  # Get the genre of the last liked podcast
-            suggestions = get_podcasts_by_genre(preferred_genre, exclude_titles=suggested_titles, limit=3)
-        else:
-            # Pick a new genre randomly
-            genre = available_genres.pop(0) if available_genres else None
-            if not genre:
-                print(" No more unique genres available.")
-                break
-            suggestions = get_podcasts_by_genre(genre, exclude_titles=suggested_titles, limit=3)
+        # Find a genre with available suggestions
+        found_suggestions = False
 
-        if not suggestions:
-            print(f" No more suggestions available for genre: {preferred_genre if liked_podcasts else genre}.")
-            continue
+        for genre in available_genres:
+            suggestions = [p for p in podcasts_by_genre[genre] if p.title not in suggested_titles]
 
-        for podcast in suggestions:
-            suggested_titles.add(podcast.title)  # Keep track of already suggested shows
+            if suggestions:
+                found_suggestions = True
+                break  # Use this genre if it has suggestions
+
+        if not found_suggestions:
+            print("No more podcasts available to suggest.")
+            break  # All podcasts have been suggested, exit loop
+
+        # Suggest up to 3 podcasts from the selected genre
+        for podcast in random.sample(suggestions, min(3, len(suggestions))):
+            suggested_titles.add(podcast.title)  # Track suggested shows
             response = input(f"Do you like '{podcast.title}'? (yes/no): ").strip().lower()
 
             if response == "yes":
                 liked_podcasts.append(
                     {"podcast_id": podcast.podcast_id, "title": podcast.title, "genre": podcast.genre})
-                if len(liked_podcasts) >=3:
+                if len(liked_podcasts) >= 3:
                     break
             else:
                 disliked_podcasts.append(
@@ -99,13 +97,13 @@ def collect_user_preferences(user_id):
         user_pref_session.commit()
 
     except Exception as e:
-        print(f" Error saving preferences: {e}")
+        print(f"Error saving preferences: {e}")
         user_pref_session.rollback()
 
     finally:
         user_pref_session.close()
 
-    print(f"\n Preferences saved for user {user_id}.")
+    print(f"\nPreferences saved for user {user_id}.")
 
 def generate_google_search_prompt(user_id):
     """Generates a prompt for OpenAI to find related shows."""
@@ -118,7 +116,6 @@ def generate_google_search_prompt(user_id):
 
     liked_titles = user_pref.liked_podcasts.split(", ")
 
-    # OpenAI prompt
     prompt = f"""
     Given these podcast shows: {', '.join(liked_titles)}, 
     write a Google Search API query that will help me find similar podcast shows in ISRAEL 
@@ -156,7 +153,6 @@ def search_related_podcasts(query, user_id):
     related_podcasts_raw = [item.get("title") for item in data.get("items", []) if item.get("title")]
 
     if not related_podcasts_raw:
-        print(" No related podcasts found via Google Search.")
         return []
 
     # Perform enhanced fuzzy matching
@@ -198,24 +194,39 @@ def recommend_top_podcasts(user_id, related_podcasts):
                         get_podcast_embedding(title) is not None]
 
     if not liked_embeddings:
-        print(" No valid embeddings found for liked podcasts.")
+        print("No valid embeddings found for liked podcasts.")
         return []
+
+    if related_podcasts:
+        print("Found related podcasts via Google Search, Now I have more data for the recommendation.")
+    else:
+        print("No related podcasts found via Google Search, recommending only based on liked podcasts.")
 
     # Get embeddings for related podcasts (that the user has not already liked)
     related_embeddings = []
     related_podcast_titles = []
 
-    for podcast in related_podcasts:
-        if podcast not in liked_podcasts:
-            embedding = get_podcast_embedding(podcast)
-            if embedding is not None:
-                related_embeddings.append(embedding)
-                related_podcast_titles.append(podcast)
+    if related_podcasts:
+        for podcast in related_podcasts:
+            if podcast not in liked_podcasts:
+                embedding = get_podcast_embedding(podcast)
+                if embedding is not None:
+                    related_embeddings.append(embedding)
+                    related_podcast_titles.append(podcast)
+    else:
+        # If no related podcasts were found, find similar ones from the full database
+        all_podcasts = podcast_session.query(Podcast.title).all()
+        for podcast in all_podcasts:
+            title = podcast[0]  # Extract title from tuple
+            if title not in liked_podcasts:  # Ensure it's not a liked podcast
+                embedding = get_podcast_embedding(title)
+                if embedding is not None:
+                    related_embeddings.append(embedding)
+                    related_podcast_titles.append(title)
 
     if not related_embeddings:
-        print("No valid embeddings found for related podcasts.")
+        print("No valid embeddings found for recommendations.")
         return []
-
     # Compute average embedding for liked podcasts
     avg_liked_embedding = np.mean(liked_embeddings, axis=0)
 
@@ -227,12 +238,36 @@ def recommend_top_podcasts(user_id, related_podcasts):
 
     # Sort by similarity (descending)
     similarity_scores.sort(key=lambda x: x[1], reverse=True)
-
     # Get the top 3 recommendations
     top_recommendations = [podcast for podcast, score in similarity_scores[:3]]
 
-    print(f"Based on the information I learned I think you should try listening to: {top_recommendations}")
+    # Fetch descriptions for recommended podcasts
+    recommended_podcasts_info = podcast_session.query(Podcast).filter(Podcast.title.in_(top_recommendations)).all()
+
+    print("\nBased on the information I learned, I think you should try listening to:")
+    for podcast in recommended_podcasts_info:
+        formatted_description = format_podcast_description(podcast.title, podcast.description)
+        print(formatted_description + "\n")
+
     return top_recommendations
+
+def format_podcast_description(name, description):
+    """Use OpenAI to format podcast recommendations."""
+    prompt = f"""
+    Format this podcast description:
+    The podcast name: {name}, the description: {description} (Use this info to write what is this podcast about) 
+    
+    Answer in this format:
+    "The podcast name: [Podcast Name, if the name is in Hebrew leave it that way]. Description: The podcast is about...[Use only English]"
+    """
+
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return response["choices"][0]["message"]["content"].strip()
+
 
 if __name__ == "__main__":
     user_id = int(input("Enter your user ID: "))
@@ -246,5 +281,5 @@ if __name__ == "__main__":
     if search_query:
         # Fetch Related Podcasts Using Google Search API
         related_podcasts = search_related_podcasts(search_query, user_id)
-        if related_podcasts:
-            recommend_top_podcasts(user_id, related_podcasts)
+        recommend_top_podcasts(user_id, related_podcasts)
+
