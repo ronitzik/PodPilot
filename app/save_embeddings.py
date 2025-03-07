@@ -4,13 +4,17 @@ import numpy as np
 import torch
 from dotenv import load_dotenv
 from transformers import AutoTokenizer, AutoModel
-from sqlalchemy import create_engine, Column, Integer, String, Text, LargeBinary, JSON
+from sqlalchemy import create_engine, Column, Integer, String, Text, LargeBinary
 from sqlalchemy.orm import sessionmaker, declarative_base
+import torch.nn.functional as F
+import openai
+
 
 # Load environment variables
 load_dotenv()
 X_USER_ID = os.getenv("X_USER_ID")
 X_API_KEY = os.getenv("X_API_KEY")
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 
 # Set up the ORM base class
@@ -57,20 +61,35 @@ tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v
 model = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
 
 
+def mean_pooling(model_output, attention_mask):
+    """Applies mean pooling to obtain a single embedding for the sentence."""
+    token_embeddings = model_output[0]  # First element contains all token embeddings
+    input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+
 def generate_embedding(text: str):
-    """Generates an embedding for the given text using Hugging Face Transformers."""
+    """Generates a 384-dimensional embedding for the given text using SBERT."""
     if not text.strip():
         return np.zeros(384)
 
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+    # Tokenize input text
+    encoded_input = tokenizer(text, padding=True, truncation=True, return_tensors="pt")
+
+    # Compute token embeddings
     with torch.no_grad():
-        outputs = model(**inputs)
-    embedding = outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
-    return embedding
+        model_output = model(**encoded_input)
+
+    # Apply mean pooling
+    sentence_embedding = mean_pooling(model_output, encoded_input['attention_mask'])
+
+    # Normalize embedding
+    sentence_embedding = F.normalize(sentence_embedding, p=2, dim=1)
+
+    return sentence_embedding.squeeze().numpy()
 
 
 def fetch_top_podcasts():
-    """Fetches the top 200 podcasts in Israel from the Taddy API."""
+    """Fetches the top podcasts in Israel from the Taddy API."""
     API_URL = "https://api.taddy.org"
 
     headers = {
@@ -114,7 +133,7 @@ def fetch_top_podcasts():
             podcasts = data.get("data", {}).get("getTopChartsByCountry", {}).get("podcastSeries", [])
 
             if not podcasts:
-                print(f"⚠️ No more podcasts returned on page {page}. Stopping pagination.")
+                print(f"No more podcasts returned on page {page}. Stopping pagination.")
                 break
 
             all_podcasts.extend(podcasts)
@@ -128,47 +147,64 @@ def fetch_top_podcasts():
     return all_podcasts[:300]  # Ensure we return exactly 300 results
 
 
+def optimize_description(description):
+    """Uses OpenAI to rewrite a Hebrew description in an embedding-efficient way."""
+    if not description.strip():
+        return "No description available."
+
+    prompt = f"""
+    Rewrite in English the following podcast description in the most concise and embedding-optimized way, preserving only the essential meaning:
+    "{description}"
+    """
+
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return response["choices"][0]["message"]["content"].strip()
+
 def save_podcasts_to_db():
-    """Fetches top 200 podcasts, generates embeddings, and stores them in SQLite."""
+    """Fetches top podcasts, optimizes their descriptions, generates embeddings, and stores them in SQLite."""
     podcasts = fetch_top_podcasts()
 
     if not podcasts:
-        print("No podcasts fetched.")
+        print(" No podcasts fetched.")
         return
 
     podcast_objects = []
 
     for podcast in podcasts:
-        podcast_id = podcast.get("uuid")  # Use `uuid` instead of `id`
-        title = podcast.get("name", "Unknown Title")  # Ensure title is not None
-        if title is None:  # Additional safety check
-            title = "Unknown Title"
-
-        description = podcast.get("description", "No description available")
-        # Extract the genre
+        podcast_id = podcast.get("uuid")
+        title = podcast.get("name", "Unknown Title") or "Unknown Title"  # Ensure title is not None
+        description = podcast.get("description", "").strip()  # Remove unnecessary spaces
         genre_data = podcast.get("genres", [])
-        if isinstance(genre_data, list) and genre_data:
-            genre = genre_data[0]
-        else:
-            genre = "Unknown Genre"
 
-            # Generate embedding for the podcast
-        full_text = f"{title}. {description}. Genre: {genre}"
-        embedding = generate_embedding(full_text)
+        # Extract genre or assign "Unknown Genre"
+        genre = genre_data[0] if isinstance(genre_data, list) and genre_data else "Unknown Genre"
+
+        optimized_description = optimize_description(description)
+
+        # Structured input for embedding
+        embedding_text = f"Podcast Title: {title}. Genre: {genre}. About: {optimized_description}"
+
+        # Generate embedding
+        embedding = generate_embedding(embedding_text)
         embedding_binary = np.array(embedding).tobytes()
 
         # Store podcast details in the database
         podcast_objects.append(Podcast(
             podcast_id=podcast_id,
             title=title,
-            description=description,
+            description=optimized_description,
             genre=genre,
             embedding=embedding_binary,
         ))
 
-    podcast_session.bulk_save_objects(podcast_objects)  # Faster than adding one by one
+    # Bulk insert into database for efficiency
+    podcast_session.bulk_save_objects(podcast_objects)
     podcast_session.commit()
-    print(f" Saved {len(podcasts)} podcasts with embeddings to the database.")
+    print(f" Saved {len(podcasts)} podcasts with optimized embeddings to the database.")
 
 
 if __name__ == "__main__":
