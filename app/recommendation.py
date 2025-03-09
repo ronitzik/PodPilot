@@ -7,7 +7,6 @@ from scipy.spatial.distance import cosine
 from thefuzz import process, fuzz
 from dotenv import load_dotenv
 from save_embeddings import Podcast, UserPreference, user_pref_session, podcast_session
-import json
 
 # Load env variables
 load_dotenv()
@@ -186,7 +185,6 @@ def search_related_podcasts(query, user_id):
             if clean_title and clean_title not in liked_podcasts:
                 related_podcasts_raw.add(clean_title)
         if not related_podcasts_raw:
-            print("No valid related podcasts found via Google Search.")
             return []
 
         # Perform enhanced fuzzy matching
