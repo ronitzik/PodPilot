@@ -1,3 +1,4 @@
+# recommendation.py
 import openai
 import os
 import random
@@ -14,20 +15,8 @@ SEARCH_ENGINE_ID = os.getenv("GOOGLE_CX")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-
-def get_podcasts_by_genre(genre, exclude_titles=set(), limit=3):
-    """Fetch a limited number of podcasts from a specific genre, excluding already suggested ones."""
-    return podcast_session.query(Podcast).filter(
-        Podcast.genre == genre,
-        Podcast.title.notin_(exclude_titles)
-    ).limit(limit).all()
-
-
-def collect_user_preferences(user_id):
-    """Dynamically suggest podcasts and adjust based on user feedback until 3 liked podcasts are collected."""
-    print("\nLet's learn your podcast preferences!")
-
-    # Get all podcasts categorized by genre
+def fetch_all_podcasts_by_genre():
+    """Fetch all podcasts and group them by genre."""
     all_podcasts = podcast_session.query(Podcast).all()
     podcasts_by_genre = {}
 
@@ -36,70 +25,61 @@ def collect_user_preferences(user_id):
             podcasts_by_genre[podcast.genre] = []
         podcasts_by_genre[podcast.genre].append(podcast)
 
-    if not podcasts_by_genre:
-        print("No podcasts available in the database.")
-        return []
+    return podcasts_by_genre
 
-    liked_podcasts = []
-    disliked_podcasts = []
-    suggested_titles = set()
-    liked_genres = set()
 
-    # Start by suggesting random genres
+def get_podcast_suggestions(podcasts_by_genre, suggested_titles, liked_genres):
+    """Suggests podcasts to the user based on liked genres or random genres."""
     available_genres = list(podcasts_by_genre.keys())
     random.shuffle(available_genres)
 
-    while len(liked_podcasts) < 3:
-        # Prioritize suggesting from genres the user already liked
-        if liked_genres:
-            possible_genres = list(liked_genres)  # Use only liked genres
-        else:
-            possible_genres = available_genres  # Use all available genres if none are liked yet
+    possible_genres = list(liked_genres) if liked_genres else available_genres
+    found_suggestions = False
 
-        found_suggestions = False
+    # Prioritize liked genres if available
+    for genre in possible_genres:
+        remaining_podcasts = [p for p in podcasts_by_genre[genre] if p.title not in suggested_titles]
+        if remaining_podcasts:
+            found_suggestions = True
+            break
 
-        for genre in possible_genres:
+    # Fallback: pick random genres if no liked genres are available
+    if not found_suggestions:
+        for genre in available_genres:
             remaining_podcasts = [p for p in podcasts_by_genre[genre] if p.title not in suggested_titles]
             if remaining_podcasts:
                 found_suggestions = True
                 break
 
-        # If no liked genres have available podcasts, pick a random genre
-        if not found_suggestions:
-            for genre in available_genres:
-                remaining_podcasts = [p for p in podcasts_by_genre[genre] if p.title not in suggested_titles]
-                if remaining_podcasts:
-                    found_suggestions = True
-                    break
+    # No suggestions available
+    if not found_suggestions:
+        return []
 
-        # If no genres have available podcasts, stop suggesting
-        if not found_suggestions:
-            print("No more podcasts available to suggest.")
+    # Suggest up to 3 podcasts from the selected genre
+    suggestions = [p for p in podcasts_by_genre[genre] if p.title not in suggested_titles]
+    return random.sample(suggestions, min(3, len(suggestions)))
+
+
+def process_user_feedback(suggestions, liked_podcasts, disliked_podcasts, liked_genres, user_responses):
+    """Processes the user's feedback on suggested podcasts, stopping after 3 liked shows."""
+    for podcast_title, response in user_responses.items():
+        if response == "yes":
+            liked_podcasts.append(podcast_title)  # Store only title
+        else:
+            disliked_podcasts.append(podcast_title)  # Store only title
+
+        # Stop processing if 3 liked shows are collected
+        if len(liked_podcasts) >= 3:
             break
 
-        # Suggest up to 3 podcasts from the selected genre
-        suggestions = [p for p in podcasts_by_genre[genre] if p.title not in suggested_titles]
-        for podcast in random.sample(suggestions, min(3, len(suggestions))):
-            suggested_titles.add(podcast.title)
-            response = input(f"Do you like '{podcast.title}'? (yes/no): ").strip().lower()
 
-            if response == "yes":
-                liked_podcasts.append(
-                    {"podcast_id": podcast.podcast_id, "title": podcast.title, "genre": podcast.genre}
-                )
-                liked_genres.add(podcast.genre)
-                if len(liked_podcasts) >= 3:
-                    break
-            else:
-                disliked_podcasts.append(
-                    {"podcast_id": podcast.podcast_id, "title": podcast.title, "genre": podcast.genre}
-                )
-
+def save_user_preferences(user_id, liked_podcasts, disliked_podcasts):
+    """Saves the user's liked and disliked podcasts in the database."""
     try:
-        # Save preferences in the database
         user_pref = user_pref_session.query(UserPreference).filter_by(user_id=user_id).first()
-        liked_podcast_names = ", ".join([podcast["title"] for podcast in liked_podcasts])
-        disliked_podcast_names = ", ".join([podcast["title"] for podcast in disliked_podcasts])
+
+        liked_podcast_names = ", ".join(liked_podcasts)  # Ensure only titles are stored
+        disliked_podcast_names = ", ".join(disliked_podcasts)
 
         if user_pref:
             user_pref.liked_podcasts = liked_podcast_names
@@ -113,15 +93,13 @@ def collect_user_preferences(user_id):
             user_pref_session.add(user_pref)
 
         user_pref_session.commit()
+        print("\n✅ Preferences successfully stored in the database.")
 
     except Exception as e:
-        print(f" Error saving preferences: {e}")
+        print(f"⚠️ Error saving preferences: {e}")
         user_pref_session.rollback()
-
     finally:
         user_pref_session.close()
-
-    print(f"\nPreferences saved for user {user_id}.")
 
 
 def generate_google_search_prompt(user_id):
@@ -303,16 +281,46 @@ def format_podcast_description(name, description):
     return response["choices"][0]["message"]["content"].strip()
 
 
-if __name__ == "__main__":
+def main():
+    """Handles user interaction for collecting podcast preferences."""
     user_id = int(input("Enter your user ID: "))
 
-    # Collect User Preferences
-    collect_user_preferences(user_id)
+    # Fetch podcasts grouped by genre
+    podcasts_by_genre = fetch_all_podcasts_by_genre()
+    if not podcasts_by_genre:
+        print("No podcasts available in the database.")
+        return
 
+    liked_podcasts, disliked_podcasts = [], []
+    suggested_titles = set()
+    liked_genres = set()
+
+    while len(liked_podcasts) < 3:
+        suggestions = get_podcast_suggestions(podcasts_by_genre, suggested_titles, liked_genres)
+        if not suggestions:
+            print("No more podcasts available to suggest.")
+            break
+
+        # Gather user responses
+        user_responses = {}
+        for podcast in suggestions:
+            suggested_titles.add(podcast.title)
+            response = input(f"Do you like '{podcast.title}'? (yes/no): ").strip().lower()
+            user_responses[podcast] = response
+
+        # Process responses
+        process_user_feedback(suggestions, liked_podcasts, disliked_podcasts, liked_genres, user_responses)
+
+    # Save user preferences
+    save_user_preferences(user_id, liked_podcasts, disliked_podcasts)
+    print(f"\nPreferences saved for user {user_id}.")
     # Generate Search Query from OpenAI
     search_query = generate_google_search_prompt(user_id)
     if search_query:
         # Fetch Related Podcasts Using Google Search API
         related_podcasts = search_related_podcasts(search_query, user_id)
         recommend_top_podcasts(user_id, related_podcasts)
+
+if __name__ == "__main__":
+    main()
 
