@@ -42,7 +42,7 @@ jobs:
           containerAppName: ${{ env.APP_NAME }}
           imageToDeploy: ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.APP_NAME }}:${{ github.sha }}
           location: ${{ env.LOCATION }}
-          targetPort: 3100
+          targetPort: 8000
           environmentVariables: |
             OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
             GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}

@@ -14,10 +14,10 @@ RUN pip install --no-cache-dir --upgrade -r requirements.txt
 COPY . .
 
 # Expose the application port
-EXPOSE 3100
+EXPOSE 8000
 
 # Set environment variables (optional, add more if needed)
 ENV PYTHONUNBUFFERED=1
 
 # Run the application using Uvicorn with Gunicorn for production
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3100", "--workers", "4"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
