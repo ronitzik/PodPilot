@@ -32,7 +32,7 @@ jobs:
 
       - name: Build and push container image
         run: |
-          docker build . -t ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.APP_NAME }}:${{ github.sha }}
+          docker build -f app/Dockerfile -t ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.APP_NAME }}:${{ github.sha }} app/
           docker push ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.APP_NAME }}:${{ github.sha }}
 
       - name: Deploy to Azure Container Apps with Environment Variables
