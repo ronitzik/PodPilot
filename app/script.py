@@ -2,7 +2,7 @@
 import requests
 
 # Base URL of the FastAPI server
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = "https://podpilot-api.livelyglacier-c9256401.westus2.azurecontainerapps.io"
 
 
 def get_user_id():
@@ -83,7 +83,6 @@ def generate_search_query(user_id):
 def search_related_podcasts(search_query, user_id):
     """Search for related podcasts based on the generated search query."""
     response = requests.post(f"{BASE_URL}/search_related_podcasts", json={"user_id": user_id, "search_query": search_query})
-
     if response.status_code == 200:
         related_podcasts = response.json().get("related_podcasts", [])
         if not related_podcasts:
