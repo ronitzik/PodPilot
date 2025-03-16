@@ -3,44 +3,81 @@ from unittest.mock import patch, MagicMock
 import numpy as np
 import torch
 from recommendation import (
-    collect_user_preferences,
     generate_google_search_prompt,
     search_related_podcasts,
-    recommend_top_podcasts
+    recommend_top_podcasts,
+    fetch_all_podcasts_by_genre,
+    get_podcast_suggestions,
+    process_user_feedback,
+    save_user_preferences,
 )
 from save_embeddings import (
     generate_embedding,
     fetch_top_podcasts,
-    optimize_description,
     save_podcasts_to_db
 )
 
 class TestPodcastRecommender(unittest.TestCase):
 
     @patch("recommendation.podcast_session")
-    @patch("recommendation.user_pref_session")
-    def test_collect_user_preferences(self, mock_user_pref_session, mock_podcast_session):
-        """Test collecting user preferences"""
+    def test_fetch_all_podcasts_by_genre(self, mock_podcast_session):
+        """Test if podcasts are correctly grouped by genre."""
         mock_podcast_session.query().all.return_value = [
             MagicMock(title="Tech Trends", genre="Technology"),
             MagicMock(title="Health Talks", genre="Health"),
             MagicMock(title="AI Insights", genre="Technology")
         ]
 
+        result = fetch_all_podcasts_by_genre()
+        self.assertIn("Technology", result)
+        self.assertIn("Health", result)
+        self.assertEqual(len(result["Technology"]), 2)
+        self.assertEqual(len(result["Health"]), 1)
+
+    @patch("recommendation.podcast_session")
+    def test_get_podcast_suggestions(self, mock_podcast_session):
+        """Test podcast suggestion logic."""
+        mock_podcast_session.query().all.return_value = [
+            MagicMock(title="Tech Trends", genre="Technology"),
+            MagicMock(title="AI Insights", genre="Technology"),
+        ]
+
+        podcasts_by_genre = fetch_all_podcasts_by_genre()
+        suggested_titles = set()
+        liked_genres = {"Technology"}
+
+        suggestions = get_podcast_suggestions(podcasts_by_genre, suggested_titles, liked_genres)
+        self.assertGreaterEqual(len(suggestions), 1)
+
+    def test_process_user_feedback(self):
+        """Test processing user feedback on podcast suggestions."""
+        suggestions = [MagicMock(title="Tech Trends"), MagicMock(title="AI Insights")]
+        liked_podcasts = []
+        disliked_podcasts = []
+        liked_genres = set()
+        user_responses = {"Tech Trends": "yes", "AI Insights": "no"}
+
+        process_user_feedback(suggestions, liked_podcasts, disliked_podcasts, liked_genres, user_responses)
+        self.assertIn("Tech Trends", liked_podcasts)
+        self.assertIn("AI Insights", disliked_podcasts)
+
+    @patch("recommendation.user_pref_session")
+    def test_save_user_preferences(self, mock_user_pref_session):
+        """Test saving user preferences."""
         mock_user_pref_session.query().filter_by().first.return_value = None
         mock_user_pref_session.add = MagicMock()
         mock_user_pref_session.commit = MagicMock()
 
-        with patch("builtins.input", side_effect=["yes", "no", "yes"]):
-            collect_user_preferences(user_id=123)
-
+        save_user_preferences(123, ["Tech Trends", "AI Insights"], ["Health Talks"])
         mock_user_pref_session.commit.assert_called_once()
 
     @patch("openai.ChatCompletion.create")
     @patch("recommendation.user_pref_session")
     def test_generate_google_search_prompt(self, mock_user_pref_session, mock_openai):
-        """Test generating a search query using OpenAI"""
-        mock_user_pref_session.query().filter_by().first.return_value = MagicMock(liked_podcasts="Tech Trends, AI Insights")
+        """Test generating a search query using OpenAI."""
+        mock_user_pref_session.query().filter_by().first.return_value = MagicMock(
+            liked_podcasts="Tech Trends, AI Insights"
+        )
 
         mock_openai.return_value = {
             "choices": [{"message": {"content": "site:spotify.com AI podcasts Israel"}}]
@@ -51,7 +88,7 @@ class TestPodcastRecommender(unittest.TestCase):
 
     @patch("requests.get")
     def test_search_related_podcasts(self, mock_requests):
-        """Test searching related podcasts using Google API"""
+        """Test searching related podcasts using Google API."""
         mock_requests.return_value.json.return_value = {
             "items": [
                 {"title": "AI Podcast | Podcast on Spotify"},
@@ -73,7 +110,7 @@ class TestPodcastRecommender(unittest.TestCase):
     @patch("recommendation.user_pref_session")
     @patch("recommendation.podcast_session")
     def test_recommend_top_podcasts(self, mock_podcast_session, mock_user_pref_session, mock_get_embedding):
-        """Test recommending top podcasts based on embeddings"""
+        """Test recommending top podcasts based on embeddings."""
         mock_user_pref_session.query().filter_by().first.return_value = MagicMock(
             liked_podcasts="Tech Trends, AI Insights"
         )
