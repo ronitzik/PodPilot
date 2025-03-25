@@ -15,6 +15,7 @@ scipy==1.11.4
 thefuzz==0.20.0
 unittest-xml-reporting==3.2.0
 gunicorn==21.2.0
+langdetect==1.0.9
 
 # Database dependencies
 SQLAlchemy
