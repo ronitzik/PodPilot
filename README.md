@@ -3,6 +3,8 @@
 ##  Overview  
 PodPilot is an **AI powered podcast recommendation system** designed to help users discover new podcasts based on their preferences.
 
+**Link for video:** https://www.linkedin.com/feed/update/urn:li:activity:7310988098996207617/
+
 ###  Why PodPilot?  
 Finding new podcasts that match your interests is often frustrating. Generic recommendations lead to repetitive content, making discovery time-consuming. 
 PodPilot solves this problem by using AI based embeddings and search queries to enhance podcast discovery.
